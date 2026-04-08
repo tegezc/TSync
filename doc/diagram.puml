@@ -1,0 +1,98 @@
+@startuml
+skinparam handwritten false
+skinparam monochrome true
+skinparam packageStyle rectangle
+
+package "Package TSync (Clean Architecture)" {
+  class TSyncManager {
+    - _localDb: ILocalDatabase
+    - _remoteStream: IRemoteStream
+    - _queue: Future<void>
+    - _isActive: bool
+    - _retryCount: int
+    - _currentLedgerId: String?
+    + statusStream: Stream<SyncStatus>
+    --
+    + startSync(ledgerId: String)
+    + stopSync()
+    + resumeConnection()
+    + pauseConnection()
+    + dispose()
+    --
+    - _startListening()
+    - _enqueueChanges(changes: List<RecordChange>)
+    - _onDataReceived(changes: List<RecordChange>)
+    - _handleError(error: Object)
+  }
+
+  interface IRemoteStream {
+    + getLedgerStream(ledgerId: String): Stream<List<RecordChange>>
+  }
+
+  interface ILocalDatabase {
+    + upsertRecords(records: List<Map>)
+    + deleteRecords(ids: List<String>)
+  }
+}
+
+TSyncManager o-- IRemoteStream : Inject
+TSyncManager o-- ILocalDatabase : Inject
+@enduml
+
+@startuml
+skinparam style strictuml
+skinparam monochrome true
+
+participant "UI Layer\n(TExm App)" as UI
+participant "TSyncManager" as TSync
+participant "IRemoteStream\n(Firestore)" as Remote
+participant "ILocalDatabase\n(Isar/SQLite)" as Local
+
+== 1. Inisialisasi & Mulai Mendengar ==
+UI -> TSync : startSync("ledger_123")
+activate TSync
+TSync -> Remote : getLedgerStream("ledger_123")
+activate Remote
+Remote -->> TSync : Stream Active
+TSync -> UI : add(SyncStatus.syncing) via statusStream
+
+== 2. Menerima Data & Masuk Antrean (Queue) ==
+note right of Remote: Server menembakkan 2 paket data\nsangat cepat (Burst)
+Remote -> TSync : emit List<RecordChange> (Paket A)
+TSync -> TSync : _enqueueChanges(Paket A)
+Remote -> TSync : emit List<RecordChange> (Paket B)
+TSync -> TSync : _enqueueChanges(Paket B)
+
+note over TSync, Local: Paket diproses berurutan SATU PER SATU agar lokal DB tidak terkunci
+TSync -> Local : _onDataReceived(Paket A) -> upsertRecords()
+activate Local
+Local -->> TSync : Success
+deactivate Local
+
+TSync -> Local : _onDataReceived(Paket B) -> upsertRecords()
+activate Local
+Local -->> TSync : Success
+deactivate Local
+
+TSync -> UI : add(SyncStatus.idle)
+
+== 3. Menghemat Baterai (Lifecycle Pause) ==
+UI -> TSync : pauseConnection() (Misal: User buka app lain)
+TSync -> Remote : cancel() subscription
+deactivate Remote
+TSync -> UI : add(SyncStatus.idle)
+
+== 4. Melanjutkan Sinkronisasi (Lifecycle Resume) ==
+UI -> TSync : resumeConnection() (User kembali ke app)
+TSync -> Remote : getLedgerStream("ledger_123")
+activate Remote
+
+== 5. Penanganan Error (Auto-Retry) ==
+Remote -> TSync : emit Error (Koneksi Internet Putus)
+deactivate Remote
+TSync -> UI : add(SyncStatus.error)
+TSync -> TSync : _handleError() -> Tunggu 2 Detik (Backoff)
+TSync -> Remote : getLedgerStream("ledger_123") (Coba Lagi)
+activate Remote
+
+@enduml
