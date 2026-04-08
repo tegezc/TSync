@@ -1,5 +1,7 @@
-/// A Calculator.
-class Calculator {
-  /// Returns [value] plus 1.
-  int addOne(int value) => value + 1;
-}
+library tsync;
+
+export 'src/contracts/i_local_database.dart';
+export 'src/contracts/i_remote_stream.dart';
+export 'src/models/record_change.dart';
+export 'src/models/sync_status.dart';
+export 'src/manager/tsync_manager.dart';
